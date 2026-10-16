@@ -216,6 +216,7 @@ const makeRunnerState = (compaction?: SessionRunnerModel.Resolved["compaction"])
     systemRemoved: false,
     systemUnavailable: false,
     systemLoadHook: Effect.void,
+    activationHook: Effect.void as Effect.Effect<void>,
     skillBaselines: new Map<Agent.ID, string>(),
     authorizations: new Array<Tool.Context>(),
     executions: new Array<string>(),
@@ -272,8 +273,6 @@ const transformTools = (registry: Tool.Interface, tools: Readonly<Record<string,
   registry.transform((editor) =>
     Object.entries(tools).forEach(([name, tool]) => editor.add({ ...tool, name, options: options ?? tool.options })),
   )
-// Counts runner waits on plugin activation; a mid-turn plugin reload must not be observed half-applied.
-let activationWaits = 0
 
 const layer = Layer.unwrap(
   Effect.map(RunnerState, (state) => {
@@ -426,9 +425,7 @@ const layer = Layer.unwrap(
       Permission.node.replace(permission),
       Config.node.replace(config),
       PluginSupervisor.node.replace(Layer.empty),
-      Plugin.node.replace(
-        Layer.mock(Plugin.Service, { awaitActivation: Effect.sync(() => void activationWaits++) }),
-      ),
+      Plugin.node.replace(Layer.mock(Plugin.Service, { awaitActivation: Effect.suspend(() => state.activationHook) })),
       SessionModelTransport.node.replace(modelTransport),
     ]
     const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
@@ -2656,20 +2653,122 @@ describe("SessionRunnerLLM", () => {
     }
   }
 
-  scenario("waits for plugin activation before a retried step prepares its context", function* (s) {
+  // A plugin reload tears down and rebuilds config-derived registrations (models, agents, skills).
+  // `reload` simulates one: the next awaitActivation parks until `finish` restores the catalog.
+  const holdActivation = (s: Scenario) =>
+    Effect.gen(function* () {
+      const parked = yield* Deferred.make<void>()
+      const reloaded = yield* Deferred.make<void>()
+      s.activationHook = Deferred.succeed(parked, undefined).pipe(Effect.andThen(Deferred.await(reloaded)))
+      return { parked: Deferred.await(parked), finish: Deferred.succeed(reloaded, undefined) }
+    })
+  const modelUnavailable = () =>
+    Effect.fail(
+      new SessionRunnerModel.ModelUnavailableError({
+        providerID: Provider.ID.make("test"),
+        modelID: Model.ID.make("reloading"),
+      }),
+    )
+
+  scenario("waits for plugin activation before selecting the agent for the next Step", function* (s) {
+    const agents = yield* Agent.Service
+    yield* agents.transform((editor) =>
+      editor.update(Agent.ID.make("reviewer"), (agent) => {
+        agent.mode = "primary"
+      }),
+    )
+    yield* s.db
+      .update(SessionTable)
+      .set({ agent: "reviewer" })
+      .where(eq(SessionTable.id, sessionID))
+      .run()
+      .pipe(Effect.orDie)
+    yield* s.admit("Echo then finish")
+    yield* s.llm.push(
+      TestLLM.tool("call-reload", "echo", { text: "reload" }),
+      TestLLM.text("Done", "text-after-agent-reload"),
+    )
+    const tools = yield* s.blockTools()
+    const run = yield* s.resume.pipe(Effect.forkChild)
+    yield* tools.started
+
+    const reload = yield* holdActivation(s)
+    const removed = yield* agents.transform((editor) => editor.remove(Agent.ID.make("reviewer")))
+    yield* tools.release
+    yield* reload.parked.pipe(Effect.raceFirst(Fiber.join(run)))
+
+    expect(s.requests).toHaveLength(1)
+    yield* removed.dispose
+    yield* reload.finish
+    yield* Fiber.join(run)
+
+    expect(s.requests).toHaveLength(2)
+    expect(yield* s.inbox).toEqual([])
+  })
+
+  scenario("waits for plugin activation before resolving the model for the next Step", function* (s) {
+    yield* s.admit("Echo then finish")
+    yield* s.llm.push(
+      TestLLM.tool("call-reload", "echo", { text: "reload" }),
+      TestLLM.text("Done", "text-after-model-reload"),
+    )
+    const tools = yield* s.blockTools()
+    const run = yield* s.resume.pipe(Effect.forkChild)
+    yield* tools.started
+
+    const reload = yield* holdActivation(s)
+    s.modelResolveHook = modelUnavailable()
+    yield* tools.release
+    yield* reload.parked.pipe(Effect.raceFirst(Fiber.join(run)))
+
+    expect(s.requests).toHaveLength(1)
+    s.modelResolveHook = Effect.void
+    yield* reload.finish
+    yield* Fiber.join(run)
+
+    expect(s.requests).toHaveLength(2)
+    expect(yield* s.inbox).toEqual([])
+  })
+
+  scenario("waits for plugin activation before a retried Step resolves the model", function* (s) {
     const hooks = yield* PluginHooks.Service
+    const parked = yield* Deferred.make<void>()
+    const reloaded = yield* Deferred.make<void>()
     yield* hooks.register("session", "retry", (event) =>
       Effect.sync(() => {
         event.decision = { retry: true, delay: 0 }
+        // The reload starts between the failed attempt and the retry.
+        s.activationHook = Deferred.succeed(parked, undefined).pipe(Effect.andThen(Deferred.await(reloaded)))
+        s.modelResolveHook = modelUnavailable()
       }),
     )
     yield* s.llm.push(TestLLM.failAfter(streamDisconnected()), TestLLM.text("Recovered", "text-activation-retry"))
-    const before = activationWaits
-    yield* s.runPrompt("Question")
+    yield* s.admit("Question")
+    const run = yield* s.resume.pipe(Effect.forkChild)
+    yield* Deferred.await(parked).pipe(Effect.raceFirst(Fiber.join(run)))
+
+    expect(s.requests).toHaveLength(1)
+    s.modelResolveHook = Effect.void
+    yield* Deferred.succeed(reloaded, undefined)
+    yield* Fiber.join(run)
 
     expect(s.requests).toHaveLength(2)
-    // Turn entry, the first step and the retried step each wait for plugin activation.
-    expect(activationWaits - before).toBe(3)
+  })
+
+  scenario("still fails the Step when the model stays unavailable after activation settles", function* (s) {
+    yield* s.admit("Echo then finish")
+    yield* s.llm.push(TestLLM.tool("call-removed", "echo", { text: "removed" }))
+    const tools = yield* s.blockTools()
+    const run = yield* s.resume.pipe(Effect.forkChild)
+    yield* tools.started
+
+    s.modelResolveHook = modelUnavailable()
+    yield* tools.release
+    const exit = yield* Effect.exit(Fiber.join(run))
+
+    expect(exit._tag).toBe("Failure")
+    if (exit._tag === "Failure") expect(Cause.pretty(exit.cause)).toContain("Model unavailable: test/reloading")
+    expect(s.requests).toHaveLength(1)
   })
 
   scenario("restarts compaction drafts after transient failures and unsuccessful finishes", function* (s) {
