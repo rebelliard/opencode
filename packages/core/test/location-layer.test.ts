@@ -34,6 +34,7 @@ import { LocationWatcher } from "@opencode/core/filesystem/location-watcher"
 import { Plugin } from "@opencode/core/plugin"
 import { Model } from "@opencode/core/model"
 import { Project } from "@opencode/core/project"
+import { ProjectTable } from "@opencode/core/project/sql"
 import { Provider } from "@opencode/core/provider"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
@@ -49,6 +50,11 @@ import { Database } from "../src/database/database"
 import { Bus } from "../src/bus"
 import { Reference } from "../src/reference"
 import { Tool } from "../src/tool"
+
+const projectRows = Effect.gen(function* () {
+  const db = (yield* Database.Service).db
+  return yield* db.select().from(ProjectTable).all().pipe(Effect.orDie)
+})
 
 const it = testEffect(
   AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node, LocationServiceMap.node]), [
@@ -144,6 +150,7 @@ describe("LocationServiceMap", () => {
           { concurrency: "unbounded" },
         )
         expect(failures.every(Exit.isFailure)).toBe(true)
+        expect(yield* projectRows).toEqual([])
         if (failure === "file") yield* Effect.promise(() => fs.rm(directory))
         yield* Effect.promise(() => fs.mkdir(directory))
         const repaired = yield* locations.contextEffect(ref)
@@ -290,10 +297,13 @@ describe("LocationServiceMap", () => {
 
           const first = yield* Location.Service.pipe(Effect.provide(locations.get(ref)), Effect.scoped, Effect.exit)
           expect(first._tag).toBe("Failure")
+          // A request for a missing directory must not leave a Project behind.
+          expect(yield* projectRows).toEqual([])
 
           yield* Effect.promise(() => fs.mkdir(directory))
           const location = yield* Location.Service.pipe(Effect.provide(locations.get(ref)), Effect.scoped)
           expect(location.directory).toBe(ref.directory)
+          expect((yield* projectRows).map((row) => row.worktree)).toEqual([location.project.directory])
         }),
       ),
     ),
@@ -318,6 +328,7 @@ describe("LocationServiceMap", () => {
           const location = yield* Location.Service.pipe(Effect.provide(locations.get(workspaceRef)), Effect.scoped)
           expect(location.directory).toBe(directory)
           expect(Array.from(yield* RcMap.keys(locations.rcMap))).toEqual([workspaceRef])
+          expect((yield* projectRows).map((row) => row.worktree)).toEqual([directory])
 
           // A local ref with the same missing directory is dropped after its
           // boot failure so a retry can rebuild it.

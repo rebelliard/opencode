@@ -4,6 +4,7 @@ import { createServer } from "node:http"
 import path from "node:path"
 import { Agent } from "@opencode/schema/agent"
 import { Integration } from "@opencode/schema/integration"
+import { Project } from "@opencode/schema/project"
 import { ServerInfo } from "@opencode/protocol/groups/server"
 import { Effect, Schedule, Schema } from "effect"
 import { Session } from "@opencode/schema/session"
@@ -70,6 +71,30 @@ it.live("returns LocationNotFoundError for a missing folder and recovers once it
       ),
     )
     expect(recovered.status).toBe(200)
+  }),
+)
+
+it.live("does not record a Project for a missing folder that returns LocationNotFoundError", () =>
+  Effect.gen(function* () {
+    const config = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-missing-project-")))
+    const directory = path.join(config.path, ".worktrees", "deleted")
+    // Projects are keyed by the real path, which differs from the temp path on macOS.
+    const canonical = path.join(yield* Effect.promise(() => fs.realpath(config.path)), ".worktrees", "deleted")
+    const handler = yield* ServerFetch.make({ ...options, config: { directory: config.path } })
+    const status = yield* Effect.promise(() =>
+      handler(
+        new Request("http://opencode.local/api/vcs/status", {
+          headers: { "x-opencode-directory": encodeURIComponent(directory) },
+        }),
+      ),
+    )
+    expect(status.status).toBe(404)
+    const projects = Schema.decodeUnknownSync(Schema.Array(Project.Info))(
+      yield* Effect.promise(() =>
+        handler(new Request("http://opencode.local/api/project?archived=true")).then((response) => response.json()),
+      ),
+    )
+    expect(projects.map((project) => project.canonical)).not.toContain(canonical)
   }),
 )
 
