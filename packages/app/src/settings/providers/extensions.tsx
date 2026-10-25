@@ -22,6 +22,8 @@ interface PluginRowItem {
 }
 
 export const SettingsExtensions: Component<{
+  // The project the settings were opened from. MCP servers run per location, so the switch has to target it.
+  directory?: string
   subtab?: SettingsView["subtab"]
   onSubtab: (value: SettingsView["subtab"]) => void
 }> = (props) => {
@@ -29,21 +31,11 @@ export const SettingsExtensions: Component<{
   const serverSdk = useServerSDK()
   const data = useData()
 
-  // Reading `.latest` rethrows a failed fetch, so these lists fall back to empty instead of crashing the page.
-  const [mcpList, { refetch: refetchMcp }] = createResource(
-    () => serverSdk.connection.status() === "connected",
-    () =>
-      serverSdk.api.mcp
-        .list()
-        .then((result) => result.data)
-        .catch(() => []),
-    { initialValue: [] },
-  )
-
-  const toggleMcp = useMcpToggle(() => undefined, refetchMcp)
+  const ref = () => (props.directory ? { directory: props.directory } : undefined)
+  const toggleMcp = useMcpToggle(() => props.directory)
 
   const mcps = createMemo<McpRowItem[]>(() => {
-    return (mcpList.latest ?? []).map((server) => ({
+    return (data.location.mcp.server.list(ref()) ?? []).map((server) => ({
       name: server.name,
       enabled: server.status.status === "connected",
     }))
@@ -54,6 +46,7 @@ export const SettingsExtensions: Component<{
     toggleMcp.mutate(item.name)
   }
 
+  // Reading `.latest` rethrows a failed fetch, so this list falls back to empty instead of crashing the page.
   const [pluginList] = createResource(
     () => serverSdk.connection.status() === "connected",
     () =>
@@ -68,7 +61,7 @@ export const SettingsExtensions: Component<{
 
   createEffect(() => {
     if (serverSdk.connection.status() !== "connected") return
-    void data.location.skill.sync().catch(() => undefined)
+    void Promise.all([data.location.mcp.server.sync(ref()), data.location.skill.sync()]).catch(() => undefined)
   })
   const skills = () => data.location.skill.list() ?? []
 

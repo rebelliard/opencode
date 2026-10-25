@@ -13,7 +13,7 @@ export type McpControls = {
   change: (name: string, enabled: boolean) => void
 }
 
-export function useMcpToggle(directory?: Accessor<string | undefined>, onSuccess?: () => unknown) {
+export function useMcpToggle(directory?: Accessor<string | undefined>) {
   const data = useData()
   const serverSDK = useServerSDK()
   const platform = usePlatform()
@@ -62,7 +62,7 @@ export function useMcpToggle(directory?: Accessor<string | undefined>, onSuccess
       }
 
       data.location.mcp.resource.invalidate(ref)
-      await Promise.all([data.location.mcp.resource.sync(ref), onSuccess?.()])
+      await data.location.mcp.resource.sync(ref)
       // A successful HTTP response can still leave the MCP connection in a failed state.
       const status = current?.status
 

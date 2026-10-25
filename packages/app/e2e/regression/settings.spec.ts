@@ -1,8 +1,9 @@
 import { expect, test, type Page } from "@playwright/test"
 import type { ConfigEntry, OpenCodeEvent, WorktreeDirectory } from "@opencode/client/promise"
 import { NO_PROVIDER, REMOTE_SERVER, SERVER, holdRoute, project, session } from "../utils/app"
-import { mockMissingLocation, mockOpenCodeServer } from "../utils/mock-server"
-import { mockRemoteServer, mockWorkspace, openSettings, type WorkspaceInput } from "../utils/workspace"
+import { mockMissingLocation, mockOpenCodeServer, type MockServerConfig } from "../utils/mock-server"
+import { mockRemoteServer, mockWorkspace, openSession, openSettings, type WorkspaceInput } from "../utils/workspace"
+import { APP_READY_TIMEOUT } from "../utils/waits"
 
 const directory = "C:/Projects/settings-demo"
 
@@ -564,6 +565,42 @@ test("worktrees follow inventory events, wait for session counts, and delete by 
   await settings.getByRole("tab", { name: "Worktrees", exact: true }).click()
   await expect(settings.getByText("13 worktrees", { exact: true })).toBeVisible()
   await expect(settings.getByLabel(sandboxes[0]!, { exact: true })).toHaveCount(0)
+})
+
+test("the MCP switch toggles the project the settings were opened from", async ({ page }) => {
+  const workspace = sandboxes[0]!
+  const actions: Parameters<NonNullable<MockServerConfig["onMcpAction"]>>[0][] = []
+  const requests: { path: string; directory: string | null }[] = []
+  page.on("request", (request) => {
+    const url = new URL(request.url())
+
+    if (request.method() === "OPTIONS" || !/^\/api\/(?:experimental\/)?mcp(?:\/|$)/.test(url.pathname)) return
+    requests.push({ path: url.pathname, directory: url.searchParams.get("location[directory]") })
+  })
+  // The server default location has the server off while the session's worktree has it on.
+  await openSession(page, {
+    name: "Settings demo",
+    directory,
+    project: { sandboxes },
+    provider: NO_PROVIDER,
+    sessions: [{ id: "ses_settings_1", title: "Workspace 1 session", directory: workspace }],
+    seed: { tabs: [] },
+    mcp: (target) => [{ name: "demo-mcp", status: { status: target === workspace ? "connected" : "disabled" } }],
+    onMcpAction: (action) => void actions.push(action),
+  })
+  await page.keyboard.press("ControlOrMeta+,")
+  const settings = page.getByTestId("settings-screen")
+  await expect(settings).toBeFocused({ timeout: APP_READY_TIMEOUT })
+  await settings.getByRole("tab", { name: "Extensions", exact: true }).click()
+  await settings.getByRole("tab", { name: "MCPs", exact: true }).click()
+  const toggle = settings.getByRole("switch", { name: "demo-mcp" })
+  await expect(toggle).toBeChecked()
+  requests.length = 0
+
+  await settings.locator('[data-slot="switch-control"]').click()
+  await expect(toggle).not.toBeChecked()
+  expect(actions).toEqual([{ server: "demo-mcp", action: "disconnect", directory: workspace }])
+  expect(requests).toContainEqual({ path: "/api/experimental/mcp/demo-mcp/disconnect", directory: workspace })
 })
 
 test.describe("worktrees prefetch", () => {
