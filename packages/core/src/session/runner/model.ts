@@ -2,10 +2,10 @@ export * as SessionRunnerModel from "./model.js"
 
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LanguageModel } from "@opencode/ai/effect"
-import { Model } from "@opencode/schema/model"
 import { Provider } from "@opencode/schema/provider"
 import { Context, Effect, Layer, Schema } from "effect"
 import { Agent } from "../../agent.js"
+import { Model } from "../../model.js"
 import { ModelResolver } from "../../model-resolver.js"
 import { SessionSchema } from "../schema.js"
 
@@ -73,6 +73,7 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const resolver = yield* ModelResolver.Service
     const agents = yield* Agent.Service
+    const models = yield* Model.Service
     return Service.of({
       resolve: Effect.fn("SessionRunnerModel.resolve")(function* (session, available) {
         // Location plugins populate and filter the catalog asynchronously during layer startup.
@@ -85,6 +86,10 @@ const layer = Layer.effect(
             ? yield* resolver.resolveModel(preferred, agent.variant)
             : yield* resolver.resolve()
           if (resolved) return resolved
+          // A configured default that the catalog cannot serve must fail like an explicit model, not route elsewhere.
+          const configured = yield* models.configured()
+          if (configured)
+            return yield* new ModelUnavailableError({ providerID: configured.providerID, modelID: configured.modelID })
           return yield* new ModelNotSelectedError({ sessionID: session.id })
         }
         const selected = (yield* available()).find(
@@ -101,4 +106,4 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeLocationNode({ service: Service, layer, deps: [ModelResolver.node, Agent.node] })
+export const node = makeLocationNode({ service: Service, layer, deps: [ModelResolver.node, Agent.node, Model.node] })

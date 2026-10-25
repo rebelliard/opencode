@@ -420,7 +420,7 @@ export const layer = Layer.effect(
               .default()
               .pipe(
                 Effect.flatMap((model) =>
-                  model && hasPackage(model)
+                  !model || hasPackage(model)
                     ? Effect.succeed(model)
                     : Effect.map(models.available(), (models) =>
                         models.find((model) => hasPackage(model) && Model.supportsText(model)),

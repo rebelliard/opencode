@@ -75,7 +75,10 @@ export interface Interface extends State.Transformable<Editor> {
   readonly get: (providerID: Provider.ID, modelID: ID) => Effect.Effect<Info | undefined>
   readonly all: () => Effect.Effect<readonly Info[]>
   readonly available: () => Effect.Effect<readonly Info[]>
+  /** Undefined when a configured default is unknown to the catalog; that is not an empty catalog. */
   readonly default: () => Effect.Effect<Info | undefined>
+  /** The configured default selection, whether or not the catalog can serve it. */
+  readonly configured: () => Effect.Effect<{ providerID: Provider.ID; modelID: ID } | undefined>
   readonly small: (providerID: Provider.ID) => Effect.Effect<Info | undefined>
 }
 
@@ -271,9 +274,16 @@ const layer = Layer.effect(
       default: Effect.fn("Model.default")(function* () {
         const value = yield* read()
         const requested = value.data.defaultModel
-        const model = requested && value.byProvider.get(requested.providerID)?.get(requested.modelID)
-        return model?.enabled ? model : value.available.find(supportsText)
+        if (!requested) return value.available.find(supportsText)
+        const model = value.byProvider.get(requested.providerID)?.get(requested.modelID)
+        if (model) return model.enabled ? model : value.available.find(supportsText)
+        // A disabled provider is expected to be missing from the catalog. Any other unknown configured default
+        // is a misconfiguration, so do not reroute it silently.
+        if (input?.records.get(requested.providerID)?.provider.activation === "disabled")
+          return value.available.find(supportsText)
+        return undefined
       }),
+      configured: Effect.fn("Model.configured")(() => read().pipe(Effect.map((value) => value.data.defaultModel))),
       small: Effect.fn("Model.small")(function* (providerID) {
         const value = yield* read()
         const models = value.available.filter(

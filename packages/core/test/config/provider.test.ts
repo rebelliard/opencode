@@ -1028,6 +1028,35 @@ describe("ConfigProviderPlugin.Plugin", () => {
     }),
   )
 
+  it.effect("keeps the configured default unresolved when its provider entry is invalid", () =>
+    Effect.gen(function* () {
+      const models = yield* Model.Service
+      const providers = yield* Provider.Service
+      const normalized = ConfigNormalize.normalize({
+        model: "probe/probe-1",
+        providers: {
+          probe: {
+            package: "aisdk:@ai-sdk/openai-compatible",
+            models: { "probe-1": { capabilities: { reasoning: true } } },
+          },
+          valid: { package: "@opencode/ai/providers/openai/chat", models: { chat: {} } },
+        },
+      })
+      if (normalized.type !== "normalized") throw new Error("Expected normalized config")
+      expect(normalized.diagnostics).toContainEqual(
+        expect.objectContaining({ kind: "invalid", path: ["providers", "probe"] }),
+      )
+      yield* addPlugin([new Document({ type: "document", info: decode(normalized.encoded) })])
+
+      expect(yield* providers.get(Provider.ID.make("probe"))).toBeUndefined()
+      expect(yield* models.configured()).toEqual({
+        providerID: Provider.ID.make("probe"),
+        modelID: Model.ID.make("probe-1"),
+      })
+      expect(yield* models.default()).toBeUndefined()
+    }),
+  )
+
   it.effect("loads configured providers and applies later model overrides", () =>
     withEnv({ CUSTOM_API_KEY: "secret" }, () =>
       Effect.gen(function* () {

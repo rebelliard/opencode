@@ -673,6 +673,31 @@ describe("Provider and Model", () => {
     }),
   )
 
+  it.effect("does not reroute a configured default the catalog does not know", () =>
+    Effect.gen(function* () {
+      const providers = yield* Provider.Service
+      const models = yield* Model.Service
+      const providerID = Provider.ID.make("test")
+      yield* providers.transform((editor) => {
+        editor.update(providerID, () => {})
+        editor.models.update(providerID, Model.ID.make("available"), () => {})
+      })
+      expect((yield* models.default())?.id).toBe(Model.ID.make("available"))
+      expect(yield* models.configured()).toBeUndefined()
+
+      yield* models.transform((editor) => editor.default.set(Provider.ID.make("missing"), Model.ID.make("model")))
+      expect(yield* models.default()).toBeUndefined()
+      expect(yield* models.configured()).toEqual({
+        providerID: Provider.ID.make("missing"),
+        modelID: Model.ID.make("model"),
+      })
+
+      // A known provider without the configured model is the same misconfiguration.
+      yield* models.transform((editor) => editor.default.set(providerID, Model.ID.make("typo")))
+      expect(yield* models.default()).toBeUndefined()
+    }),
+  )
+
   it.effect("small model uses the newest release in the first matching family", () =>
     Effect.gen(function* () {
       const providers = yield* Provider.Service
