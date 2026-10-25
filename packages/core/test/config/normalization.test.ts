@@ -559,6 +559,9 @@ describe("ConfigNormalize", () => {
     const secret = "do-not-log-this-value"
     const result = normalized({
       logLevel: "DEBUG",
+      share: "disabled",
+      autoshare: true,
+      enterprise: { url: secret },
       agent: { reviewer: { name: secret, prompt: "review" } },
       provider: {
         custom: {
@@ -577,6 +580,9 @@ describe("ConfigNormalize", () => {
     })
     expect(result.diagnostics.filter((item) => item.kind === "unsupported").map((item) => item.path)).toEqual([
       ["logLevel"],
+      ["share"],
+      ["autoshare"],
+      ["enterprise"],
       ["agent", "reviewer", "name"],
       ["provider", "custom", "id"],
       ["provider", "custom", "whitelist"],
@@ -585,6 +591,8 @@ describe("ConfigNormalize", () => {
       ["provider", "custom", "models", "model", "interleaved"],
       ["experimental", "openTelemetry"],
     ])
+    expect(result.encoded).not.toHaveProperty("share")
+    expect(result.encoded).not.toHaveProperty("enterprise")
     expect(JSON.stringify(result.diagnostics)).not.toContain(secret)
   })
 
@@ -703,7 +711,6 @@ describe("ConfigNormalize", () => {
   test("preserves explicit false, zero, empty list, and empty map presence", () => {
     const result = normalized({
       snapshot: false,
-      autoshare: false,
       references: {},
       commands: {},
       agents: {},
@@ -720,6 +727,5 @@ describe("ConfigNormalize", () => {
       instructions: [],
       experimental: { subagent_depth: 0, location_idle_timeout: false },
     })
-    expect(result.encoded.share).toBeUndefined()
   })
 })
